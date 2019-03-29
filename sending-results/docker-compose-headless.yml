@@ -1,0 +1,53 @@
+version: '3'
+services:
+  master:
+    container_name: master
+    hostname: master
+    ports:
+     - "5557:5557"
+     - "5558:5558"
+    image: "grubykarol/locust:0.9.0-python3.6-alpine3.9"
+    environment:
+      ATTACKED_HOST: http://example.com
+      LOCUST_MODE: master
+      LOCUST_MASTER_BIND_PORT: 5557
+      FEEDER_BIND_PORT: 5555
+      TASK_DELAY: 1000
+      QUIET_MODE: "${QUIET_MODE:-false}"
+      LOCUST_OPTS: "--no-web --expect-slaves 1 -c 1 -r 1 -t 100s"
+    volumes:
+      - ./locust-scripts:/locust
+
+  slave:
+    image: "grubykarol/locust:0.9.0-python3.6-alpine3.9"
+    environment:
+      ATTACKED_HOST: http://example.com
+      LOCUST_MODE: slave
+      LOCUST_MASTER: master
+      LOCUST_MASTER_BIND_PORT: 5557
+      FEEDER_HOST: master
+      FEEDER_BIND_PORT: 5555
+      TASK_DELAY: 1000
+      QUIET_MODE: "${QUIET_MODE:-false}"
+      LOCUST_OPTS: "--no-web"
+      NO_PROXY: master
+    volumes:
+      - ./locust-scripts:/locust
+
+  standalone:
+    image: "grubykarol/locust:0.9.0-python3.6-alpine3.9"
+    container_name: standalone
+    hostname: standalone
+    ports:
+     - "8189:8189"
+    environment:
+      ATTACKED_HOST: http://standalone:8189
+      LOCUST_MODE: standalone
+      FEEDER_HOST: standalone
+      FEEDER_BIND_PORT: 5555
+      TASK_DELAY: 100
+      QUIET_MODE: "${QUIET_MODE:-false}"
+      LOCUST_OPTS: "--no-web -c 1 -r 1 -t 10s"
+      NO_PROXY: standalone
+    volumes:
+      - ./locust-scripts:/locust

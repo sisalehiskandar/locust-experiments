@@ -6,27 +6,27 @@ services:
     ports:
      - "5557:5557"
      - "5558:5558"
-    image: "grubykarol/locust:0.9.0-python3.6-alpine3.9"
+    image: "test/test"
+#    image: "grubykarol/locust:0.9.0-python3.6-alpine3.9"
     environment:
       ATTACKED_HOST: http://example.com
       LOCUST_MODE: master
       LOCUST_MASTER_BIND_PORT: 5557
-      FEEDER_BIND_PORT: 5555
+      ES_CONNECTIONS: "elasticsearch:9200"
       TASK_DELAY: 1000
       QUIET_MODE: "${QUIET_MODE:-false}"
-      LOCUST_OPTS: "--no-web --expect-slaves 1 -c 1 -r 1 -t 100s"
+      LOCUST_OPTS: "--no-web --expect-slaves 1 -c 1 -r 1 -t 30s"
     volumes:
       - ./locust-scripts:/locust
 
   slave:
-    image: "grubykarol/locust:0.9.0-python3.6-alpine3.9"
+    image: "test/test"
     environment:
       ATTACKED_HOST: http://example.com
       LOCUST_MODE: slave
       LOCUST_MASTER: master
       LOCUST_MASTER_BIND_PORT: 5557
-      FEEDER_HOST: master
-      FEEDER_BIND_PORT: 5555
+      ES_CONNECTIONS: "elasticsearch:9200"
       TASK_DELAY: 1000
       QUIET_MODE: "${QUIET_MODE:-false}"
       LOCUST_OPTS: "--no-web"
@@ -35,7 +35,7 @@ services:
       - ./locust-scripts:/locust
 
   standalone:
-    image: "grubykarol/locust:0.9.0-python3.6-alpine3.9"
+    image: "test/test"
     container_name: standalone
     hostname: standalone
     ports:
@@ -43,8 +43,7 @@ services:
     environment:
       ATTACKED_HOST: http://standalone:8189
       LOCUST_MODE: standalone
-      FEEDER_HOST: standalone
-      FEEDER_BIND_PORT: 5555
+      ES_CONNECTIONS: "elasticsearch:9200"
       TASK_DELAY: 100
       QUIET_MODE: "${QUIET_MODE:-false}"
       LOCUST_OPTS: "--no-web -c 1 -r 1 -t 10s"

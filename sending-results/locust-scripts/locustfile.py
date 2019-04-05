@@ -1,20 +1,22 @@
+import json
 import os
-import sys
 
 import gevent
 import locust
-from gevent.queue import Queue
-from locust import TaskSet, task, HttpLocust, events, runners
-from locust.runners import MasterLocustRunner, SlaveLocustRunner, LocalLocustRunner
+from locust import TaskSet, task, HttpLocust, events
+
+from tools.backend_base import DBForwarder
+from tools.detectors import *
+from tools.elastic import ElasticSearchAdapter
 
 ##################
 # Reading environment variables and setting up constants
 #
-FEEDER_HOST = os.getenv("FEEDER_HOST", "127.0.0.1")
-FEEDER_BIND_PORT = os.getenv("FEEDER_BIND_PORT", 5555)
-FEEDER_ADDR = f"tcp://{FEEDER_HOST}:{FEEDER_BIND_PORT}"
+ES_CONNECTIONS = os.getenv("ES_CONNECTIONS", "127.0.0.1:9200").split(sep=",")
 QUIET_MODE = True if os.getenv("QUIET_MODE", "true").lower() in ['1', 'true', 'yes'] else False
 TASK_DELAY = int(os.getenv("TASK_DELAY", "1000"))
+
+print(f"--------- es_connections {type(ES_CONNECTIONS)} -> {ES_CONNECTIONS}")
 
 
 def log(message):
@@ -22,55 +24,69 @@ def log(message):
         print(message)
 
 
-##################
-# Code for detecting run context
+###
 #
-def is_test_ran_on_master(): return isinstance(runners.locust_runner, MasterLocustRunner)
-def is_test_ran_on_slave(): return isinstance(runners.locust_runner, SlaveLocustRunner)
-def is_test_ran_on_standalone(): return isinstance(runners.locust_runner, LocalLocustRunner)
-def is_locustfile_ran_on_master(): return '--master' in sys.argv
-def is_locustfile_ran_on_slave(): return '--slave' in sys.argv
-def is_locustfile_ran_on_standalone(): return not ('--slave' in sys.argv or '--master' in sys.argv)
+# configuration for the master
+if is_locustfile_ran_on_master() or is_locustfile_ran_on_standalone():
+    def report_data_producer(client_id, data):
+        print(f"-------------------------data_producer({client_id}, {data})")
+
+        # dissect the report
+        # the slave report data format is: # 'stats':[], 'stats_total':{  }, errors':{}, 'user_count':0
+        # for this example, let's only take stats (and extract individual records for that) and total fields
+        global forwarder
+        total_stat = {"type": "total", "source": client_id, "payload": data["stats_total"]}
+        forwarder.add(total_stat)
+
+        for stat in data["stats"]:
+            print(f"stat: {stat}")
+            aggregated_stat_message = {"type": "aggregated", "source": client_id, "payload": stat}
+            forwarder.add(aggregated_stat_message)
 
 
-user_count_map = {}
-HOST = os.getenv('GRAPHITE_HOST', '127.0.0.1')
-PORT = os.getenv('GRAPHITE_PORT', '2003')
+    print("starting external db forwarder on master")
+    forwarder = DBForwarder()
 
-forwarder_queue = Queue()
+    ea = ElasticSearchAdapter(ES_CONNECTIONS)
+    forwarder.add_backend(ea)
+    gevent.spawn(forwarder.run)
 
+    print("adding slave_report hook")
+    locust.events.slave_report += report_data_producer
 
-def external_db_forwarder():
-    # XXX TODO ideally, connection is separtated.
-    # forwarder pops a value and uses a list of adapters to forward it to different sinks
-    # (then connection code belong to a sink)
-    print(f"-----------connecting to the db on {HOST}, {PORT}")
-    # XXX TODO TBD
-    pass
+###
+#
+# configuration for the slave
+if is_locustfile_ran_on_slave() or is_test_ran_on_standalone():
+    print("starting external db forwarder on slave")
+    forwarder = DBForwarder()
 
-    while True:
-        data = forwarder_queue.get()
-        print(f"db forwarder sending {data}")
-        # XXX TODO TBD use elasticsearch adapter to convert and send
-        pass
-
-
-def setup_db_forwarder():
-    if is_locustfile_ran_on_master() or is_locustfile_ran_on_standalone():
-        print("starting external dv forwarder")
-        gevent.spawn(external_db_forwarder)
-        locust.events.slave_report += data_producer
+    ea = ElasticSearchAdapter(ES_CONNECTIONS)
+    forwarder.add_backend(ea)
+    gevent.spawn(forwarder.run)
 
 
-def data_producer(client_id, data):
-    print(f"data_producer({client_id}, {data})")
-    for stat in data["stats"]:
-        print(f"stat: {stat}")
-        aggregated_stat_message = {"type": "aggregated", "source": client_id, "payload": stat}
-        forwarder_queue.put(aggregated_stat_message)
+    def additional_success_handler(request_type, name, response_time, response_length, **kwargs):
+        """ additional request success handler to log statistics """
+        OK_TEMPLATE = '{"request_type":"%s", "name":"%s", "result":"%s", ' \
+                      '"response_time":"%s", "response_length":"%s", "other":%s}'
+
+        json_string = OK_TEMPLATE % (request_type, name, "OK", response_time, response_length, json.dumps(kwargs))
+        message = {"type": "success", "payload": json.loads(json_string)}
+        forwarder.add(message)
 
 
-setup_db_forwarder()
+    def additional_failure_handler(request_type, name, response_time, exception, **kwargs):
+        """ additional request failure handler to log statistics """
+        ERR_TEMPLATE = '{"request_type":"%s", "name":"%s", "result":"%s", ' \
+                       '"response_time":"%s", "exception":"%s", "other":%s}'
+        json_string = ERR_TEMPLATE % (request_type, name, "ERR", response_time, exception, json.dumps(kwargs))
+        message = {"type": "error", "payload": json.loads(json_string)}
+        forwarder.add(message)
+
+
+    events.request_success += additional_success_handler
+    events.request_failure += additional_failure_handler
 
 
 class TestBehaviour(TaskSet):
@@ -81,19 +97,12 @@ class TestBehaviour(TaskSet):
     def task1(self):
         log("task1")
         self.client.get("/")
+        self.client.get("/stat")
+        self.client.post("/cos")
+        self.client.get("/ala/ma")
 
 
 class TestUser(HttpLocust):
     task_set = TestBehaviour
     min_wait = TASK_DELAY
     max_wait = TASK_DELAY
-
-
-##
-def mark(category, message):
-    import datetime
-    now = datetime.datetime.now()
-
-    new_path = f"./{category}.txt"
-    with open(new_path, 'a') as file:
-        file.write(f"{now}\t{message}\n")
